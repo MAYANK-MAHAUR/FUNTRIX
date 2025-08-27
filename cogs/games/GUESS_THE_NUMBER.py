@@ -8,13 +8,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ALLOWED_ROLES = ["Game Master", "Moderator"]
+ALLOWED_ROLES = ["Game Master", "Moderator", "Host"]
 
 class Guess_no(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.active_games = {}
-        # Renamed for clarity as it now handles the entire game loop, not just hints.
         self.game_tasks = {}
 
     @commands.Cog.listener()
@@ -49,7 +48,7 @@ class Guess_no(commands.Cog):
             "players": set(),
             "max": max_number,
             "duration": duration,
-            "winner_id": None, # To store the winner's ID
+            "winner_id": None, 
             "host_id": interaction.user.id,
             "host_name": interaction.user.name,
             "game_name": "Guess the Number",

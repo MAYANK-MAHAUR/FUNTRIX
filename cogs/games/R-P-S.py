@@ -1,14 +1,14 @@
-import discord
 import asyncio
-import os
+import random
+import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load environment variables if you are using a .env file
+# load_dotenv() 
 
-ALLOWED_ROLES = ["Game Master", "Moderator"]
-
+# --- Constants ---
 CHOICES = [
     app_commands.Choice(name="🪨 Rock", value="rock"),
     app_commands.Choice(name="📄 Paper", value="paper"),
@@ -21,6 +21,48 @@ BEATS = {
     "scissors": "rock"
 }
 
+# --- UI View for the Dropdown ---
+class RPSView(discord.ui.View):
+    def __init__(self, cog_instance):
+        super().__init__(timeout=None)
+        self.cog = cog_instance
+
+    @discord.ui.select(
+        placeholder="Choose your move...",
+        options=[
+            discord.SelectOption(label="Rock", value="rock", emoji="🪨"),
+            discord.SelectOption(label="Paper", value="paper", emoji="📄"),
+            discord.SelectOption(label="Scissors", value="scissors", emoji="✂️")
+        ]
+    )
+    async def select_callback(self, interaction: discord.Interaction, select: discord.ui.Select):
+        guild_id = interaction.guild.id
+        game_data = self.cog.active_rps.get(guild_id)
+
+        if not game_data:
+            return await interaction.response.send_message(
+                "❗ No RPS game is currently running in this server.", ephemeral=True
+            )
+
+        if interaction.user.id in game_data["guesses"]:
+            return await interaction.response.send_message(
+                "❌ You have already made your guess for this round!", ephemeral=True
+            )
+
+        guess_value = select.values[0]
+        game_data["guesses"][interaction.user.id] = guess_value
+
+        guess_name = "your move"
+        for option in select.options:
+            if option.value == guess_value:
+                guess_name = f"{option.emoji} {option.label}"
+                break
+        
+        await interaction.response.send_message(
+            f"✅ Your guess of **{guess_name}** has been recorded.", ephemeral=True
+        )
+
+# --- Main Cog ---
 class RPS(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -30,111 +72,115 @@ class RPS(commands.Cog):
     async def on_ready(self):
         print("RPS cog is ready.")
 
-    @app_commands.command(name="startrps", description="Start Rock Paper Scissors with a chosen answer")
-    @app_commands.describe(correct_choice="Pick your secret choice (players will try to guess the counter)")
-    @app_commands.choices(correct_choice=CHOICES)
-    async def startrps(
-        self,
-        interaction: discord.Interaction,
-        correct_choice: app_commands.Choice[str]
-    ):
+    @app_commands.command(name="startrps", description="Start a Rock Paper Scissors game.")
+    @app_commands.describe(choice="Choose your move to start the game.")
+    @app_commands.choices(choice=CHOICES)
+    async def start_rps(self, interaction: discord.Interaction, choice: app_commands.Choice[str]):
+        # NOTE: This version does not have role restrictions, as the user's
+        # `GUESS_THE_NUMBER.py` has its own `ALLOWED_ROLES` list.
+        # You may want to re-add your `DatabaseManager` and role checks if needed.
         guild_id = interaction.guild.id
-        
-        if not any(role.name in ALLOWED_ROLES for role in interaction.user.roles):
-            return await interaction.response.send_message("❌ You don't have permission to start RPS.", ephemeral=True)
 
         if guild_id in self.active_rps:
-            return await interaction.response.send_message("❗ RPS is already running in this server.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❗ An RPS game is already running in this server.", ephemeral=True
+            )
 
-        host_choice = correct_choice.value.lower()
-        if host_choice == "scissor":
-            host_choice = "scissors"
-
-        correct_answer_for_players = BEATS[host_choice] 
+        winning_move = BEATS[choice.value]
+        
         self.active_rps[guild_id] = {
-            "running": True,
+            "channel_id": interaction.channel.id,
+            "winning_move": winning_move,
+            "guesses": {},
             "stop_event": asyncio.Event(),
-            "answer": correct_answer_for_players,
-            "host": interaction.user,
-            "channel_id": interaction.channel.id
+            "message_id": None
         }
 
-        await interaction.response.send_message(embed=discord.Embed(
-            title="🎮 Rock Paper Scissors Started!",
-            description=f"Host has picked a choice. Guess what **beats** it! (rock, paper, or scissors)\n\n"
-                        f"⏱️ You have 60 seconds to guess!",
-            color=discord.Color.blurple()
-        ))
+        embed = discord.Embed(
+            title="🪨📄✂️ Rock Paper Scissors",
+            description=(
+                "**A new game has started!**\n\n"
+                "The host has chosen their secret move.\n"
+                "To win, you must pick the move that **beats** their choice.\n\n"
+                "You have **60 seconds** to pick!\n\n"
+                "👇 Use the dropdown menu below to lock in your move."
+            ),
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="Good luck!")
+        
+        view = RPSView(self)
+        await interaction.response.send_message(embed=embed, view=view)
+        
+        message = await interaction.original_response()
+        self.active_rps[guild_id]["message_id"] = message.id
+        
+        self.bot.loop.create_task(self.run_rps_game(interaction.channel))
 
-        self.bot.loop.create_task(self.wait_for_guess(interaction.channel))
-
-    async def wait_for_guess(self, channel):
+    async def run_rps_game(self, channel):
         guild_id = channel.guild.id
-        data = self.active_rps.get(guild_id)
-        if not data or not data["running"]:
+        game_data = self.active_rps.get(guild_id, {})
+        if not game_data:
             return
 
-        correct_guess = data["answer"]
-        stop_event = data["stop_event"]
-        host = data["host"]
+        try:
+            await asyncio.wait_for(game_data["stop_event"].wait(), timeout=60.0)
+            await channel.send("🛑 RPS game cancelled by an admin.")
+        
+        except asyncio.TimeoutError:
+            winning_move = game_data["winning_move"]
+            correct_guesses = [
+                user_id for user_id, guess in game_data["guesses"].items()
+                if guess == winning_move
+            ]
 
-        timeout_seconds = 60
+            await channel.send("🔍 **Time's up! Finding the winner...**")
+            await asyncio.sleep(2)
 
-        winner_found = False
-
-        while not stop_event.is_set():
-            try:
-                msg = await self.bot.wait_for(
-                    "message",
-                    timeout=timeout_seconds,
-                    check=lambda m: m.channel.id == data["channel_id"] and not m.author.bot and m.content.lower().strip() in ["rock", "paper", "scissors", "scissor"]
+            if correct_guesses:
+                winner_id = random.choice(correct_guesses)
+                winner_user = self.bot.get_user(winner_id) or await self.bot.fetch_user(winner_id)
+                
+                final_embed = discord.Embed(
+                    title="🎉 We Have a Winner!",
+                    description=f"{winner_user.mention} guessed the correct move!",
+                    color=discord.Color.green()
                 )
-                
-                guess = msg.content.lower().strip()
-                if guess == "scissor":
-                    guess = "scissors"
+                await channel.send(embed=final_embed)
 
-                if guess == correct_guess:
-                    winner_found = True
-                    user_id = str(msg.author.id)
+            else:
+                final_embed = discord.Embed(
+                    title="Game Over",
+                    description="😔 No one guessed correctly!",
+                    color=discord.Color.red()
+                )
+                await channel.send(embed=final_embed)
 
-                    await msg.add_reaction("🎉")
-                    await channel.send(embed=discord.Embed(
-                        title="🏆 Correct Guess!",
-                        description=(
-                            f"{msg.author.mention} guessed **{correct_guess.capitalize()}** and won!"
-                        ),
-                        color=discord.Color.green()
-                    ))
-                    break
-                
-            except asyncio.TimeoutError:
-                break
-
-        if not winner_found and self.active_rps.get(guild_id, {}).get("running", False):
-            await channel.send(embed=discord.Embed(
-                title="⌛ Game Timed Out",
-                description=f"No one guessed correctly. The correct answer was **{correct_guess.capitalize()}**.",
-                color=discord.Color.red()
-            ))
+        # --- Cleanup ---
+        if game_data and game_data.get("message_id"):
+            try:
+                original_message = await channel.fetch_message(game_data["message_id"])
+                await original_message.edit(view=None)
+            except (discord.NotFound, discord.Forbidden):
+                pass
         
         self.active_rps.pop(guild_id, None)
+        await channel.send("✅ The game is over.")
 
     @app_commands.command(name="stoprps", description="Force stop the Rock Paper Scissors game")
     async def stoprps(self, interaction: discord.Interaction):
         guild_id = interaction.guild.id
         
-        if not any(role.name in ALLOWED_ROLES for role in interaction.user.roles):
-            return await interaction.response.send_message("❌ You don't have permission to stop RPS.", ephemeral=True)
+        if not any(role.name in ["Game Master", "Moderator"] for role in interaction.user.roles):
+            return await interaction.response.send_message("❌ You don't have permission.", ephemeral=True)
 
         if guild_id in self.active_rps:
             self.active_rps[guild_id]["stop_event"].set()
-            self.active_rps.pop(guild_id, None)
-
-            await interaction.response.send_message("🛑 RPS game stopped.")
-            await interaction.channel.send("⚠️ RPS game forcefully stopped in this channel.")
+            await interaction.response.send_message("🛑 Stopping the RPS game...", ephemeral=True)
         else:
-            await interaction.response.send_message("❗ No RPS game is currently running in this channel.", ephemeral=True)
+            await interaction.response.send_message(
+                "❗ No RPS game is currently running in this server.", ephemeral=True
+            )
 
 async def setup(bot):
     await bot.add_cog(RPS(bot))
