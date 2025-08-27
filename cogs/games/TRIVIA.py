@@ -70,7 +70,7 @@ class Trivia(commands.Cog):
         if not settings:
             return await interaction.response.send_message("❌ This server is not set up. Please run `/setup` first!", ephemeral=True)
             
-        allowed_roles = settings.get('allowed_roles', [])
+        allowed_roles = settings.get('allowed_roles', ['Host'])
         
         user_roles = [role.name for role in interaction.user.roles]
         if not any(role in user_roles for role in allowed_roles):
